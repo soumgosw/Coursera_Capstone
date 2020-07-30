@@ -13,32 +13,32 @@ from sklearn.metrics import classification_report
 
 from logger import update_predict_log, update_train_log
 
-## specific variables for the versioning
+## model specific variables (iterate the version and note with each change)
 if not os.path.exists(os.path.join(".","models")):
     os.mkdir("models") 
 
 MODEL_VERSION = 0.1
-MODEL_VERSION_NOTE = "Model Version 0.1"
-SAVED_MODEL = os.path.join("models","model-{}.joblib".format(re.sub("\\.","_",str(MODEL_VERSION))))
+MODEL_VERSION_NOTE = "SVM on AAVAIL churn"
+SAVED_MODEL = os.path.join("models","model-{}.joblib".format(re.sub("\.","_",str(MODEL_VERSION))))
 
 
-def load_data():
+def load_aavail_data():
     data_dir = os.path.join(".","data")
-    df = pd.read_csv(os.path.join(data_dir,r"data.csv"))
+    df = pd.read_csv(os.path.join(data_dir,r"aavail-target.csv"))
        
     ## pull out the target and remove uneeded columns
-    isSubscriber = df.pop('is_subscriber')
-    b = np.zeros(isSubscriber.size)
-    b[isSubscriber==0] = 1 
-    df.drop(columns=['customer_id'],inplace=True)
+    _y = df.pop('is_subscriber')
+    y = np.zeros(_y.size)
+    y[_y==0] = 1 
+    df.drop(columns=['customer_id','customer_name'],inplace=True)
     df.head()
-    a = df
+    X = df
 
-    return(a,b)
+    return(X,y)
 
 def get_preprocessor():
     """
-    preprocessing pipeline
+    return the preprocessing pipeline
     """
 
     ## preprocessing pipeline
@@ -56,15 +56,36 @@ def get_preprocessor():
 
     return(preprocessor)
 
-def train(test=False):
+def model_train(test=False):
     """
-    funtion to train the model
+    example funtion to train model
+    
+    The 'test' flag when set to 'True':
+        (1) subsets the data and serializes a test version
+        (2) specifies that the use of the 'test' log file
+
+    The iris dataset is already small so the subset is shown as an example
+
+    Note that the latest training data is always saved to be used by perfromance monitoring tools.
     """
-   
-    ## load data
-    X,y = load_data()
+
+    ## start timer for runtime
+    time_start = time.time()
+    
+    ## data ingestion
+    X,y = load_aavail_data()
+
+
     preprocessor = get_preprocessor()
 
+    ## subset the data to enable faster unittests
+    if test:
+        n_samples = int(np.round(0.9 * X.shape[0]))
+        subset_indices = np.random.choice(np.arange(X.shape[0]),n_samples,replace=False).astype(int)
+        mask = np.in1d(np.arange(y.size),subset_indices)
+        y=y[mask]
+        X=X[mask]  
+    
     ## Perform a train-test split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
     ## Specify parameters and model
@@ -73,12 +94,12 @@ def train(test=False):
         'clf__criterion':['gini','entropy'],
         'clf__max_depth':[2,4,6]
     }
-   
+
+    print("... grid searching")
     clf = ensemble.RandomForestClassifier()
     pipe = Pipeline(steps=[('pre', preprocessor),
                            ('clf',clf)])
     
-    print("... grid search")
     grid = GridSearchCV(pipe, param_grid=param_grid, cv=5, iid=False, n_jobs=-1)
     grid.fit(X_train, y_train)
     params = grid.best_params_
@@ -90,6 +111,8 @@ def train(test=False):
                            ('clf',clf)])
     
     pipe.fit(X_train,y_train)
+    y_pred = pipe.predict(X_test)
+    eval_test = classification_report(y_test,y_pred,output_dict=True)
     
     ## retrain using all data
     pipe.fit(X, y)
@@ -105,45 +128,64 @@ def train(test=False):
         data_file = os.path.join("models",'latest-train.pickle')
         with open(data_file,'wb') as tmp:
             pickle.dump({'y':y,'X':X},tmp)
-    
+        
+    m, s = divmod(time.time()-time_start, 60)
+    h, m = divmod(m, 60)
+    runtime = "%03d:%02d:%02d"%(h, m, s)
 
-def predict(query,model=None,test=False):
+    ## update the log file
+    update_train_log(X.shape,eval_test,runtime,
+                     MODEL_VERSION, MODEL_VERSION_NOTE,test=test)
+
+def model_predict(query,model=None,test=False):
     """
-    function to predict from model
+    example funtion to predict from model
     """
-   
-    ## validations
+
+    ## start timer for runtime
+    time_start = time.time()
+    
+    ## input checks
     if isinstance(query,dict):
         query = pd.DataFrame(query)
     elif isinstance(query,pd.DataFrame):
         pass
     else:
-        raise Exception("ERROR: invalid input. {} was given".format(type(query)))
+        raise Exception("ERROR (model_predict) - invalid input. {} was given".format(type(query)))
 
     ## features check
     features = sorted(query.columns.tolist())
     if features != ['age', 'country', 'num_streams', 'subscriber_type']:
         print("query features: {}".format(",".join(features)))
-        raise Exception("ERROR: invalid features present") 
+        raise Exception("ERROR (model_predict) - invalid features present") 
     
     ## load model if needed
     if not model:
-        model = loadModel()
+        model = model_load()
     
-    ## check output
+    ## output checking
     if len(query.shape) == 1:
         query = query.reshape(1, -1)
     
-    ## predict outcome
+    ## make prediction and gather data for log entry
     y_pred = model.predict(query)
     y_proba = 'None'
-           
+    
+    m, s = divmod(time.time()-time_start, 60)
+    h, m = divmod(m, 60)
+    runtime = "%03d:%02d:%02d"%(h, m, s)
+
+    ## update the log file
+    for i in range(query.shape[0]):
+        update_predict_log(y_pred[i],y_proba,query.iloc[i].values.tolist(), 
+                           runtime,MODEL_VERSION,test=test)
+        
     return({'y_pred':y_pred,'y_proba':y_proba})
 
 
-def loadModel():
+def model_load():
     """
-    funtion to load model
+    example funtion to load model
     """
 
     if not os.path.exists(SAVED_MODEL):
@@ -157,14 +199,14 @@ def loadModel():
 if __name__ == "__main__":
 
     """
-    unit test procedure
+    basic test procedure for model.py
     """
     
     ## train the model
-    train(test=True)
+    model_train(test=True)
 
     ## load the model
-    model = loadModel()
+    model = model_load()
     
     ## example predict
     query = pd.DataFrame({'country': ['united_states','singapore','united_states'],
@@ -173,6 +215,6 @@ if __name__ == "__main__":
                           'num_streams': [8,17,14]
     })
 
-    result = predict(query,model,test=True)
+    result = model_predict(query,model,test=True)
     y_pred = result['y_pred']
     print("predicted: {}".format(y_pred))
